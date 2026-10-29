@@ -1,7 +1,3 @@
-# MT5-Setup-on-Xubuntu26.04.1
-How to fix the terminal64.exe debugger error
-
-
 # MetaTrader 5 Wine-Staging Master Setup Guide (Xubuntu / Ubuntu)
 
 This reference playbook provides step-by-step instructions to automate and troubleshoot the installation of MetaTrader 5 on modern Ubuntu/Xubuntu 26.04.1 LTS distributions using `wine-staging` to bypass debugger flags.
@@ -73,3 +69,151 @@ Wine defaults to a 32-bit prefix if background processes are active. Always kill
    * Click **Install** if a **Wine Gecko** prompt appears (handles HTML rendering).
 
 Once completed, the official MetaTrader 5 graphical setup wizard will open cleanly, allowing you to proceed with your automated data extraction setup!
+
+
+
+# MetaTrader 5 Python Bridge (`mt5linux`) Setup & Architecture Guide
+
+This guide details how to establish a robust RPyC bridge between a native **Linux Python environment** and a **Windows MetaTrader 5 terminal** running under Wine.
+
+---
+
+## 1. How the Architecture Works
+
+Because MetaTrader 5 relies on Windows C++ dynamic link libraries (`.dll`), Linux-native Python cannot load the official `MetaTrader5` package directly. 
+
+The `mt5linux` package solves this using an **RPyC (Remote Python Call)** client-server architecture over TCP port `22346`:
+
+```
+┌──────────────────────────────────────┐       TCP Port 22346        ┌──────────────────────────────────────┐
+│       Linux Python Environment       │  ───────────────►─────────  │         Wine Prefix (~/.wine-mt5)    │
+│                                      │                             │                                      │
+│  Script: extarct_yearly_1m_data.py   │                             │   RPyC Server (mt5server.exe)        │
+│  Library: mt5linux                   │                             │               │                      │
+└──────────────────────────────────────┘                             │               ▼                      │
+                                                                     │     MetaTrader 5 (terminal64.exe)   │
+                                                                     └──────────────────────────────────────┘
+```
+
+1. **Client (Linux Side):** Runs your trading/extraction scripts using native Linux Python.
+2. **Server (Wine Side):** Runs `mt5server.exe` (or Windows Python with `mt5linux`), listening on port `22346` to translate commands into native MT5 Windows API calls.
+
+---
+
+## 2. Server Setup Methods
+
+### Method A: Standalone `mt5server.exe` (Recommended)
+
+The standalone `mt5server.exe` binary bundles Windows Python, RPyC, and the MetaTrader5 library into a single executable—no Python installation inside Wine is required.
+
+#### Step 1: Download the Server Binary
+Download `mt5server.exe` from the official [lucas-campagna/mt5linux GitHub Releases](https://github.com/lucas-campagna/mt5linux/releases) into your `~/Downloads` folder.
+
+#### Step 2: Place inside the Wine Prefix Drive C
+Move the executable directly into the root directory of your Wine prefix (`drive_c`):
+
+```bash
+cp ~/Downloads/mt5server.exe ~/.wine-mt5/drive_c/mt5server.exe
+```
+
+---
+
+### Method B: Installing Python inside Wine (Alternative)
+
+If you prefer to run the server directly through Python in Wine:
+
+1. Download the Windows Python installer (64-bit):
+   ```bash
+   wget https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe -O ~/Downloads/python-3.10.11-amd64.exe
+   ```
+2. Install Python inside your prefix:
+   ```bash
+   export WINEPREFIX="$HOME/.wine-mt5"
+   export WINEARCH="win64"
+   wine ~/Downloads/python-3.10.11-amd64.exe
+   ```
+   *(Check **"Add Python.exe to PATH"** during setup).*
+
+3. Install requirements inside Wine:
+   ```bash
+   wine cmd /c "python -m pip install --upgrade pip"
+   wine cmd /c "python -m pip install MetaTrader5 rpyc mt5linux"
+   ```
+
+---
+
+## 3. Automation Script (`start_mt5_bridge.sh`)
+
+To launch both MetaTrader 5 and the bridge server cleanly from any location on your system, create a single shell script:
+
+```bash
+nano ~/Desktop/start_mt5_bridge.sh
+```
+
+Paste the following code:
+
+```bash
+#!/bin/bash
+
+# Define Wine prefix environment
+export WINEPREFIX="$HOME/.wine-mt5"
+export WINEARCH="win64"
+
+echo "[*] Cleaning up existing Wine server instances..."
+wineserver -k
+
+echo "[*] Launching MetaTrader 5 terminal..."
+wine "C:\Program Files\MetaTrader 5\terminal64.exe" &
+
+echo "[*] Waiting 6 seconds for MT5 terminal startup..."
+sleep 6
+
+echo "[*] Launching mt5server bridge on port 22346..."
+wine "C:\mt5server.exe" --port 22346 &
+
+echo "[*] Bridge active and ready for Linux Python connections!"
+```
+
+Make the script executable:
+
+```bash
+chmod +x ~/Desktop/start_mt5_bridge.sh
+```
+
+---
+
+## 4. Client-Side Python Integration
+
+In your Linux Python script (`extarct_yearly_1m_data.py`), initialize the connection using `mt5linux`:
+
+```python
+from mt5linux import MetaTrader5
+
+MT5_HOST = "127.0.0.1"
+MT5_PORT = 22346
+
+# Initialize client connection to the Wine server bridge
+mt5 = MetaTrader5(host=MT5_HOST, port=MT5_PORT)
+
+if not mt5.initialize():
+    print("[-] MT5 initialization failed:", mt5.last_error())
+else:
+    print("[+] Successfully connected to MetaTrader 5 via mt5linux bridge!")
+```
+
+---
+
+## 5. Troubleshooting & Common Errors
+
+### `EOFError: connection closed by peer`
+* **Cause:** The Linux client tried to connect to port `22346`, but the Wine server dropped the connection.
+* **Fixes:**
+  1. Confirm `mt5server.exe` is running inside Wine.
+  2. Verify that MetaTrader 5 is fully open and logged in prior to running your Python script.
+  3. Ensure `rpyc` versions on both the Linux side and Wine side are compatible.
+
+### Port Already in Use
+If port `22346` is blocked by a hung process, terminate background Wine sessions before retrying:
+```bash
+wineserver -k
+```
