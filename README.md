@@ -217,3 +217,134 @@ If port `22346` is blocked by a hung process, terminate background Wine sessions
 ```bash
 wineserver -k
 ```
+
+
+# MetaTrader 5 Python Bridge (`mt5linux`) Master Blueprint
+
+Here is the complete, master blueprint for setting up the Linux-to-Wine MetaTrader 5 bridge from scratch. This method represents the most stable and robust approach, designed to avoid version mismatches and port conflict traps.
+
+---
+
+## Understanding the Architecture
+
+MetaTrader 5 relies entirely on Windows C++ dynamic link libraries (`.dll` files). Because Linux uses `.so` shared objects, your native Linux Python cannot load the `MetaTrader5` library directly.
+
+The `mt5linux` bridge solves this using **RPyC (Remote Python Call)** to bridge the gap over a local TCP network socket:
+
+```
+[ Linux Python Script (Client) ] 
+       │ 
+       │  (Sends commands via TCP Port 22346)
+       ▼
+[ Windows Python inside Wine (Server running mt5linux) ]
+       │ 
+       │  (Calls native Windows DLLs)
+       ▼
+[ MetaTrader 5 Terminal ]
+```
+
+---
+
+## The Golden Rule for a Stable Setup
+
+> **Always synchronize your `rpyc` package versions.**
+>
+> The most common point of failure is a protocol mismatch between your Linux client environment and your Wine server environment (e.g., `ValueError: invalid message type`). Both sides **must** run the exact same `rpyc` version.
+
+---
+
+## Step-by-Step Setup Guide (Portable Blueprint)
+
+### Step 1: Install Windows Python inside Your Wine Prefix
+
+Do not rely on pre-compiled standalone server binaries (`.exe`), as they lock you into rigid dependency versions. Instead, install native Windows Python inside your target Wine prefix.
+
+1. **Set your Wine environment variables:**
+   ```bash
+   export WINEPREFIX="$HOME/.wine-mt5"
+   export WINEARCH="win64"
+   ```
+
+2. **Download and run the official Windows 64-bit Python installer (e.g., Python 3.10) inside Wine:**
+   ```bash
+   wine python-3.10.11-amd64.exe
+   ```
+   * **Critical:** Check the box during installation to **"Add Python.exe to PATH"**.
+
+---
+
+### Step 2: Synchronize Package Versions (Linux & Wine)
+
+1. **Check what version of `rpyc` your Linux Python environment is running:**
+   ```bash
+   pip show rpyc
+   ```
+   *(Suppose it returns version `5.2.3`).*
+
+2. **Open a Windows command prompt inside Wine and install that exact matching version along with `mt5linux`:**
+   ```bash
+   export WINEPREFIX="$HOME/.wine-mt5"
+   wine cmd
+   ```
+
+3. **Inside the Windows command window, run:**
+   ```cmd
+   python -m pip install --upgrade pip
+   python -m pip install rpyc==5.2.3 mt5linux MetaTrader5
+   exit
+   ```
+
+---
+
+### Step 3: Implement a Clean Launch Sequence (Avoid Port Conflicts)
+
+Port `22346` is prone to staying locked in the background if a previous process crashes (`WinError 10048`). Always purge stale processes before starting the bridge.
+
+Create a master startup script (e.g., `start_bridge.sh`):
+
+```bash
+#!/bin/bash
+
+export WINEPREFIX="$HOME/.wine-mt5"
+export WINEARCH="win64"
+
+echo "[*] Purging stale background processes..."
+wineserver -k
+pkill -9 -f wine
+pkill -9 -f mt5linux
+
+echo "[*] Launching MetaTrader 5 Terminal..."
+wine "C:\Program Files\MetaTrader 5\terminal64.exe" &
+
+echo "[*] Waiting for MT5 to initialize..."
+sleep 8
+
+echo "[*] Launching mt5linux Bridge Server on port 22346..."
+wine python -m mt5linux --port 22346 &
+
+echo "[*] Bridge is active and ready!"
+```
+
+---
+
+### Step 4: Connect Your Client Script
+
+In your Python extraction or trading script on the Linux side, initialize the client pointing to `localhost` on your designated port:
+
+```python
+from mt5linux import MetaTrader5 as mt5
+
+# Connects securely to the Wine server running on port 22346
+client = mt5(host="127.0.0.1", port=22346)
+
+if client.initialize():
+    print("[*] Successfully connected to MT5 via Wine bridge!")
+```
+
+---
+
+## Why This Method Wins
+
+1. **Full Compatibility:** Because you use native Windows Python inside Wine, `MetaTrader5` interacts with its native Windows DLL environment without wrapper translation issues.
+2. **Version Control:** Pinning matching `rpyc` versions (`rpyc==5.2.3`) completely eliminates protocol handshake errors.
+3. **Resilience:** Explicitly killing `wineserver` and orphaned processes in your launch script guarantees you will never hit `WinError 10048` address-in-use blocks when rebooting your environment.
